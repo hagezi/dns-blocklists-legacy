@@ -18,23 +18,40 @@ jobs:
       new_tag: ${{ steps.tag_version.outputs.new_tag }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: Bump version and push tag
+      - name: Compute CalVer tag (YYYY.M.N)
         id: tag_version
-        uses: mathieudutour/github-tag-action@v6.2
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          default_bump: patch
+        run: |
+          YEAR=$(date +'%Y')
+          MONTH=$(date +'%-m')
+
+          # Find the latest tag matching the current year.month, sorted by counter
+          LATEST=$(git tag -l "${YEAR}.${MONTH}.*" --sort=-v:refname | head -n 1)
+
+          if [ -z "$LATEST" ]; then
+            COUNTER=0
+          else
+            LAST_COUNTER=$(echo "$LATEST" | awk -F. '{print $3}')
+            COUNTER=$((LAST_COUNTER + 1))
+          fi
+
+          NEW_TAG="${YEAR}.${MONTH}.${COUNTER}"
+          echo "New tag: $NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.tag_version.outputs.new_tag }}
           name: ${{ steps.tag_version.outputs.new_tag }}
-          body: ${{ steps.tag_version.outputs.changelog }}
           make_latest: "true"
           token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -43,7 +60,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Wait 3 minutes before purging jsDelivr cache
         run: sleep 180
@@ -70,7 +87,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
@@ -81,7 +98,6 @@ jobs:
           REPO="${{ github.repository }}"
           LATEST_TAG="${{ needs.release.outputs.new_tag }}"
 
-          # Fallback: determine latest tag directly if output wasn't propagated
           if [ -z "$LATEST_TAG" ]; then
             LATEST_TAG=$(git describe --tags --abbrev=0)
           fi
@@ -97,7 +113,6 @@ jobs:
             fi
           done
 
-          # Safety net: remove any remaining tags not tied to a release
           ALL_TAGS=$(git tag)
           for TAG in $ALL_TAGS; do
             if [ "$TAG" != "$LATEST_TAG" ]; then
@@ -106,7 +121,6 @@ jobs:
             fi
           done
 
-          # Ensure the remaining release is explicitly marked as latest
           gh release edit "$LATEST_TAG" --repo "$REPO" --latest || true
 
       - name: Delete all workflow runs except the current one

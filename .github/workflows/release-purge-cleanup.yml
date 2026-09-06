@@ -1,0 +1,127 @@
+name: SemVer Release, jsDelivr Purge & Cleanup
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  release:
+    if: github.event_name == 'workflow_dispatch' || github.event.head_commit.message == 'release'
+    runs-on: ubuntu-latest
+    outputs:
+      new_tag: ${{ steps.tag_version.outputs.new_tag }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Compute version tag
+        id: tag_version
+        run: |
+          NEW_TAG=$(printf '%o' "$(date -u +"%Y")")$(date +'%Y.%-j').$((`date +%s` % 86400 ))
+          echo "New tag: $NEW_TAG"
+          echo "new_tag=$NEW_TAG" >> "$GITHUB_OUTPUT"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$NEW_TAG"
+          git push origin "$NEW_TAG"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ steps.tag_version.outputs.new_tag }}
+          name: ${{ steps.tag_version.outputs.new_tag }}
+          make_latest: "true"
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+  purge_jsdelivr:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Wait 3 minutes before purging jsDelivr cache
+        run: sleep 180
+
+      - name: Purge jsDelivr cache for .txt files in domains/ and hosts/ (@latest)
+        run: |
+          REPO="${{ github.repository }}"
+          echo "Searching for .txt files in domains/ and hosts/..."
+          FILES=$(git ls-files "domains/*.txt" "hosts/*.txt")
+
+          if [ -z "$FILES" ]; then
+            echo "No .txt files found in domains/ or hosts/, nothing to purge."
+            exit 0
+          fi
+
+          echo "$FILES" | while IFS= read -r FILE; do
+            URL="https://purge.jsdelivr.net/gh/${REPO}@latest/${FILE}"
+            echo "Purging: $URL"
+            curl -s -o /dev/null -w "  -> HTTP %{http_code}\n" "$URL"
+          done
+
+  cleanup:
+    needs: [release, purge_jsdelivr]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Delete all releases and tags except the latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          LATEST_TAG="${{ needs.release.outputs.new_tag }}"
+
+          if [ -z "$LATEST_TAG" ]; then
+            LATEST_TAG=$(git describe --tags --abbrev=0)
+          fi
+
+          echo "Keeping release/tag: $LATEST_TAG"
+
+          ALL_RELEASES=$(gh release list --repo "$REPO" --limit 1000 --json tagName --jq '.[].tagName')
+
+          for TAG in $ALL_RELEASES; do
+            if [ "$TAG" != "$LATEST_TAG" ]; then
+              echo "Deleting release: $TAG"
+              gh release delete "$TAG" --repo "$REPO" --yes --cleanup-tag || true
+            fi
+          done
+
+          ALL_TAGS=$(git tag)
+          for TAG in $ALL_TAGS; do
+            if [ "$TAG" != "$LATEST_TAG" ]; then
+              echo "Deleting leftover tag: $TAG"
+              git push --delete origin "$TAG" || true
+            fi
+          done
+
+          gh release edit "$LATEST_TAG" --repo "$REPO" --latest || true
+
+      - name: Delete all workflow runs except the current one
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REPO="${{ github.repository }}"
+          CURRENT_RUN_ID="${{ github.run_id }}"
+
+          RUN_IDS=$(gh run list --repo "$REPO" --limit 1000 --json databaseId --jq '.[].databaseId')
+
+          for RUN_ID in $RUN_IDS; do
+            if [ "$RUN_ID" != "$CURRENT_RUN_ID" ]; then
+              echo "Deleting workflow run: $RUN_ID"
+              gh run delete "$RUN_ID" --repo "$REPO" || true
+            fi
+          done
